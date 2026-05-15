@@ -67,36 +67,33 @@ FONT_CANDIDATES = [
 AI_STYLE_PROMPT = """
 You are an expert sports illustrator and digital artist.
 
-Transform the provided background-removed soccer player cutout into a hyper-detailed sketch + watercolor sports portrait.
+Transform the provided background-removed soccer player cutout into a transparent artistic player illustration.
 
-Create a WAIST-UP or MID-THIGH-UP composition only. The player must appear large, dominant, and poster-worthy, not small or full-body.
+Important:
+Return ONLY the player artwork as a transparent PNG cutout.
+Do not create a background.
+Do not create a white rectangle.
+Do not create a poster.
+Do not create a card.
+Do not add text, numbers, logos, badges, borders, shadows, or frames.
 
-Composition rules:
-- Crop the artwork from roughly waist or mid-thigh upward.
-- Keep the player centered.
-- Make the face and upper body large and prominent.
-- The final player artwork should fill most of the vertical canvas.
-- Preserve the player’s identity, face, hairstyle, beard, skin tone, expression, jersey, pose, and body proportions.
-- Do not change the player into a different person.
+Style:
+Make the player look like hand-drawn ink sketch art mixed with watercolor texture.
+Use rough black sketch lines, gritty sports-poster detailing, and controlled watercolor shading.
+Use navy blue, deep gold, black, and subtle warm orange accents so the player matches the existing card canvas.
+Keep the artwork natural and premium, not cartoonish.
 
-Style rules:
-- Use hand-drawn ink sketch lines.
-- Add watercolor paint textures, splashes, ink drops, rough energetic strokes, and subtle grunge detail.
-- Use the jersey/team colors naturally in the paint splashes.
-- Make it look like a premium sports poster illustration.
+Composition:
+Create a large waist-up or mid-thigh-up player artwork.
+The player should feel bold, close, and dominant.
+Preserve the player’s face, identity, hairstyle, beard, expression, pose, and clothing structure.
+Do not change the person into a different character.
 
-Output rules:
-- Return only the artistic player cutout.
-- Transparent background outside the player and paint splashes.
-- No white rectangle.
-- No card layout.
-- No text.
-- No names.
-- No numbers.
-- No logos.
-- No badges.
-- No shadows.
-- No watermark.
+Blending:
+Keep edges soft and irregular, like watercolor fading into transparent space.
+Avoid hard rectangular boundaries.
+Avoid generated background splashes that form a visible box.
+The artwork must be ready to composite naturally onto an existing navy/gold watercolor sports card template.
 """
 
 
