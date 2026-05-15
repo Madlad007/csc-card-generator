@@ -1,26 +1,28 @@
 import base64
-from io import BytesIO
+import io
 from pathlib import Path
+from typing import Optional, Tuple
 
 import streamlit as st
-from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 from rembg import remove
 
-try:
-    from openai import OpenAI
-except Exception:  # OpenAI is optional at runtime; rembg-only mode still works.
-    OpenAI = None
 
-
-# -----------------------------------------------------------------------------
-# Card and asset configuration
-# -----------------------------------------------------------------------------
 CARD_WIDTH = 1080
 CARD_HEIGHT = 1350
-BACKGROUND_PATH = Path("assets/background.png")
-FOREGROUND_SPLASHES_PATH = Path("assets/foreground_splashes.png")
 
-# Text placement constants tuned for the current 1080x1350 background artwork.
+BACKGROUND_PATH = Path("assets/background.png")
+FOREGROUND_SPLASH_PATH = Path("assets/foreground_splashes.png")
+
+PLAYER_ZONE_X1 = 390
+PLAYER_ZONE_Y1 = 160
+PLAYER_ZONE_X2 = 740
+PLAYER_ZONE_Y2 = 1120
+
+FULL_BODY_TARGET_HEIGHT = 840
+HALF_BODY_TARGET_HEIGHT = 720
+CLOSE_UP_TARGET_HEIGHT = 600
+
 PLAYER_NAME_X = 105
 PLAYER_NAME_Y = 205
 PLAYER_NAME_FONT_SIZE = 92
@@ -50,16 +52,6 @@ PASSING_COLOR = "#C99700"
 
 STAT_FONT_SIZE = 86
 
-# Player placement constants. Keep these separate for easy future tuning.
-PLAYER_ZONE_X1 = 390
-PLAYER_ZONE_Y1 = 160
-PLAYER_ZONE_X2 = 740
-PLAYER_ZONE_Y2 = 1120
-
-FULL_BODY_TARGET_HEIGHT = 840
-HALF_BODY_TARGET_HEIGHT = 720
-CLOSE_UP_TARGET_HEIGHT = 600
-
 FONT_CANDIDATES = [
     "assets/fonts/brush.ttf",
     "assets/fonts/BebasNeue-Regular.ttf",
@@ -68,203 +60,120 @@ FONT_CANDIDATES = [
     "C:/Windows/Fonts/arial.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf",
     "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
     "/Library/Fonts/Arial Bold.ttf",
 ]
 
+AI_STYLE_PROMPT = """
+You are an expert sports illustrator and digital artist.
 
-# -----------------------------------------------------------------------------
-# Streamlit page setup
-# -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="CSC Tournament Card Generator",
-    page_icon="⚽",
-    layout="centered",
-)
+Transform the provided background-removed soccer player cutout into a hyper-detailed artistic sports portrait in a sketch + watercolor splash style, inspired by premium sports poster art.
 
-st.title("CSC Tournament Card Generator")
-st.caption("Create a 1080×1350 tournament trading card from a player photo.")
+Follow these rules carefully:
+
+- Preserve the player’s identity, facial features, hairstyle, beard, skin tone, expression, and proportions exactly.
+- Preserve the player’s pose, jersey, shorts, socks, shoes, and overall body composition exactly.
+- Keep the artwork as a full-body or three-quarter sports portrait with dynamic athletic energy.
+- Use expressive hand-drawn ink sketch lines with rough energetic strokes.
+- Add watercolor splashes, paint textures, ink drops, and abstract brush strokes around the player.
+- Use the jersey/team colors naturally inside the artistic splashes and paint effects.
+- Background must remain clean white with abstract watercolor splashes only.
+- Do NOT add scenery, stadiums, gradients, backgrounds, landscapes, or environments.
+- Do NOT add typography, text, numbers, names, logos, borders, trading card layouts, quotes, badges, or design elements.
+- Do NOT add shadows, floor shadows, fake lighting glows, or pasted cutout effects.
+- The artwork must feel naturally painted and integrated.
+- Maintain transparent background outside the painted player artwork.
+- Return ONLY the final artistic PNG cutout with transparency.
+- No watermark. No explanation. No text.
+"""
 
 
-# -----------------------------------------------------------------------------
-# Font helpers
-# -----------------------------------------------------------------------------
 def load_font(size: int) -> ImageFont.FreeTypeFont:
-    """Load a large TrueType font. Never fall back to PIL's tiny bitmap font."""
     for candidate in FONT_CANDIDATES:
-        path = Path(candidate)
-        try:
-            if path.exists() or candidate.startswith("C:/Windows") or candidate.startswith("/"):
+        if Path(candidate).exists():
+            try:
                 return ImageFont.truetype(candidate, size=size)
-        except Exception:
-            continue
+            except OSError:
+                continue
 
-    # Last-resort TrueType names commonly discoverable by Pillow/fontconfig.
-    for font_name in ["DejaVuSans-Bold.ttf", "Arial Bold.ttf", "arialbd.ttf"]:
+    for bundled_name in ("DejaVuSansCondensed-Bold.ttf", "DejaVuSans-Bold.ttf", "Arial.ttf"):
         try:
-            return ImageFont.truetype(font_name, size=size)
-        except Exception:
+            return ImageFont.truetype(bundled_name, size=size)
+        except OSError:
             continue
 
-    raise RuntimeError(
-        "No usable TrueType font found. Add assets/fonts/brush.ttf or "
-        "assets/fonts/BebasNeue-Regular.ttf, or install DejaVu/Arial fonts."
-    )
+    raise RuntimeError("No usable TrueType font found. Add assets/fonts/brush.ttf.")
 
 
-def draw_centered_text(
-    draw: ImageDraw.ImageDraw,
-    center_x: int,
-    center_y: int,
-    text: str,
-    font: ImageFont.FreeTypeFont,
-    fill: str,
-) -> None:
-    """Center text horizontally and vertically around an exact pixel point."""
-    value = str(text)
-    bbox = draw.textbbox((0, 0), value, font=font)
-    width = bbox[2] - bbox[0]
-    height = bbox[3] - bbox[1]
-    x = center_x - width / 2 - bbox[0]
-    y = center_y - height / 2 - bbox[1]
-    draw.text((x, y), value, font=font, fill=fill)
+def open_image_from_input(image_file) -> Image.Image:
+    image_file.seek(0)
+    image = Image.open(image_file)
+    image = ImageOps.exif_transpose(image)
+    return image.convert("RGBA")
 
 
-def draw_card_text(
-    card: Image.Image,
-    player_name: str,
-    team_name: str,
-    jersey_number: str,
-    speed: int,
-    shooting: int,
-    passing: int,
-) -> Image.Image:
-    """Draw only the entered values, with no debug text or backing rectangles."""
-    draw = ImageDraw.Draw(card)
-
-    player_font = load_font(PLAYER_NAME_FONT_SIZE)
-    team_font = load_font(TEAM_NAME_FONT_SIZE)
-    jersey_font = load_font(JERSEY_NUMBER_FONT_SIZE)
-    stat_font = load_font(STAT_FONT_SIZE)
-
-    draw.text(
-        (PLAYER_NAME_X, PLAYER_NAME_Y),
-        player_name.upper(),
-        font=player_font,
-        fill=PLAYER_NAME_COLOR,
-    )
-    draw.text(
-        (TEAM_NAME_X, TEAM_NAME_Y),
-        team_name.upper(),
-        font=team_font,
-        fill=TEAM_NAME_COLOR,
-    )
-
-    draw_centered_text(
-        draw,
-        JERSEY_NUMBER_CENTER_X,
-        JERSEY_NUMBER_CENTER_Y,
-        jersey_number,
-        jersey_font,
-        JERSEY_NUMBER_COLOR,
-    )
-    draw_centered_text(draw, SPEED_CENTER_X, SPEED_CENTER_Y, speed, stat_font, SPEED_COLOR)
-    draw_centered_text(
-        draw,
-        SHOOTING_CENTER_X,
-        SHOOTING_CENTER_Y,
-        shooting,
-        stat_font,
-        SHOOTING_COLOR,
-    )
-    draw_centered_text(draw, PASSING_CENTER_X, PASSING_CENTER_Y, passing, stat_font, PASSING_COLOR)
-
-    return card
-
-
-# -----------------------------------------------------------------------------
-# Image processing helpers
-# -----------------------------------------------------------------------------
-def read_input_image(uploaded_file) -> Image.Image:
-    """Open a user-uploaded/camera image safely and normalize orientation/mode."""
-    try:
-        image = Image.open(uploaded_file)
-        image.load()
-        return image.convert("RGBA")
-    except UnidentifiedImageError as exc:
-        raise ValueError("The uploaded file is not a supported image.") from exc
-    except Exception as exc:
-        raise ValueError("Could not read the uploaded image. Try a different photo.") from exc
-
-
-def remove_background(image: Image.Image) -> Image.Image:
-    """Remove the photo background using rembg and return an RGBA cutout."""
-    input_buffer = BytesIO()
-    image.save(input_buffer, format="PNG")
-    output_bytes = remove(input_buffer.getvalue())
-    return Image.open(BytesIO(output_bytes)).convert("RGBA")
-
-
-def alpha_bbox(image: Image.Image):
-    """Return the visible alpha bounding box for an RGBA image."""
+def alpha_bounds(image: Image.Image) -> Optional[Tuple[int, int, int, int]]:
     if image.mode != "RGBA":
         image = image.convert("RGBA")
     return image.getchannel("A").getbbox()
 
 
-def crop_to_alpha(image: Image.Image, padding: int = 18) -> Image.Image:
-    """Crop transparent margins around the player while preserving a small pad."""
-    bbox = alpha_bbox(image)
-    if not bbox:
-        return image
-    left, top, right, bottom = bbox
+def crop_transparent_cutout(image: Image.Image, padding: int = 24) -> Image.Image:
+    bounds = alpha_bounds(image)
+    if not bounds:
+        return image.convert("RGBA")
+
+    left, top, right, bottom = bounds
     left = max(0, left - padding)
     top = max(0, top - padding)
     right = min(image.width, right + padding)
     bottom = min(image.height, bottom + padding)
-    return image.crop((left, top, right, bottom))
+    return image.crop((left, top, right, bottom)).convert("RGBA")
 
 
-def clean_cutout_alpha(cutout: Image.Image) -> Image.Image:
-    """Soften alpha edges and reduce white fringe without adding a backing layer."""
+def clean_cutout(cutout: Image.Image) -> Image.Image:
     cutout = cutout.convert("RGBA")
     r, g, b, a = cutout.split()
 
-    # Slightly smooth the matte edge for a poster-like composite.
-    a = a.filter(ImageFilter.MedianFilter(size=3)).filter(ImageFilter.GaussianBlur(radius=0.45))
+    a = a.filter(ImageFilter.MedianFilter(size=3)).filter(ImageFilter.GaussianBlur(radius=0.35))
 
-    # Pull very bright edge pixels down a bit to reduce white halos from photos.
     rgb = Image.merge("RGB", (r, g, b))
-    edge_mask = a.filter(ImageFilter.FIND_EDGES).point(lambda p: min(255, p * 3))
-    darkened = ImageEnhance.Brightness(rgb).enhance(0.92)
-    rgb = Image.composite(darkened, rgb, edge_mask)
+    rgb = ImageEnhance.Color(rgb).enhance(1.08)
+    rgb = ImageEnhance.Contrast(rgb).enhance(1.06)
+    rgb = ImageEnhance.Sharpness(rgb).enhance(1.08)
 
     cleaned = Image.merge("RGBA", (*rgb.split(), a))
-    return cleaned
+    return crop_transparent_cutout(cleaned, padding=18)
 
 
-def classify_shot(cutout: Image.Image) -> str:
-    """Classify the cutout by visible aspect ratio for subject-aware sizing."""
-    bbox = alpha_bbox(cutout)
-    if not bbox:
+def remove_player_background(image: Image.Image) -> Image.Image:
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    removed_bytes = remove(buffer.getvalue())
+    cutout = Image.open(io.BytesIO(removed_bytes)).convert("RGBA")
+    return clean_cutout(cutout)
+
+
+def classify_player_shot(cutout: Image.Image) -> str:
+    bounds = alpha_bounds(cutout)
+    if not bounds:
         return "half_body"
-    width = bbox[2] - bbox[0]
-    height = bbox[3] - bbox[1]
-    if height <= 0:
-        return "half_body"
 
-    aspect = width / height
-    if aspect < 0.42:
+    left, top, right, bottom = bounds
+    visible_width = max(1, right - left)
+    visible_height = max(1, bottom - top)
+    ratio = visible_height / visible_width
+
+    if ratio >= 2.25:
         return "full_body"
-    if aspect < 0.72:
+    if ratio >= 1.45:
         return "half_body"
     return "close_up"
 
 
-def resize_player_for_zone(cutout: Image.Image) -> tuple[Image.Image, str]:
-    """Resize player cutout according to shot type while respecting card zone width."""
-    shot_type = classify_shot(cutout)
+def resize_player_for_zone(cutout: Image.Image) -> Tuple[Image.Image, str]:
+    shot_type = classify_player_shot(cutout)
+
     target_height = {
         "full_body": FULL_BODY_TARGET_HEIGHT,
         "half_body": HALF_BODY_TARGET_HEIGHT,
@@ -272,247 +181,217 @@ def resize_player_for_zone(cutout: Image.Image) -> tuple[Image.Image, str]:
     }[shot_type]
 
     scale = target_height / max(1, cutout.height)
-    target_width = int(cutout.width * scale)
+    new_width = max(1, int(cutout.width * scale))
+    new_height = max(1, int(cutout.height * scale))
 
     zone_width = PLAYER_ZONE_X2 - PLAYER_ZONE_X1
-    max_width = int(zone_width * 1.35)
-    if target_width > max_width:
-        scale = max_width / max(1, cutout.width)
-        target_width = max_width
-        target_height = int(cutout.height * scale)
+    if new_width > zone_width * 1.22:
+        scale = (zone_width * 1.22) / max(1, cutout.width)
+        new_width = max(1, int(cutout.width * scale))
+        new_height = max(1, int(cutout.height * scale))
 
-    resized = cutout.resize((target_width, target_height), Image.Resampling.LANCZOS)
+    resized = cutout.resize((new_width, new_height), Image.Resampling.LANCZOS)
     return resized, shot_type
 
 
-def player_paste_position(player: Image.Image, shot_type: str) -> tuple[int, int]:
-    """Anchor the player in the tuned zone without drawing any grey backing layer."""
-    zone_center_x = (PLAYER_ZONE_X1 + PLAYER_ZONE_X2) // 2
-    zone_bottom = PLAYER_ZONE_Y2
+def paste_player_with_blend(card: Image.Image, cutout: Image.Image) -> Image.Image:
+    player, shot_type = resize_player_for_zone(cutout)
 
-    x = int(zone_center_x - player.width / 2)
+    zone_width = PLAYER_ZONE_X2 - PLAYER_ZONE_X1
+    zone_height = PLAYER_ZONE_Y2 - PLAYER_ZONE_Y1
+
+    x = int(PLAYER_ZONE_X1 + (zone_width - player.width) / 2)
 
     if shot_type == "full_body":
-        y = int(zone_bottom - player.height)
+        y = int(PLAYER_ZONE_Y2 - player.height)
     elif shot_type == "half_body":
-        y = int(zone_bottom - player.height + 22)
+        y = int(PLAYER_ZONE_Y1 + zone_height * 0.28)
     else:
-        y = int(PLAYER_ZONE_Y1 + 90)
+        y = int(PLAYER_ZONE_Y1 + zone_height * 0.2)
 
-    return x, y
+    x = max(0, min(CARD_WIDTH - player.width, x))
+    y = max(0, min(CARD_HEIGHT - player.height, y))
 
-
-def add_player_shadow(card: Image.Image, player: Image.Image, x: int, y: int) -> None:
-    """Composite a soft shadow/glow derived from alpha only, not a rectangle."""
-    alpha = player.getchannel("A")
-
-    shadow = Image.new("RGBA", player.size, (0, 0, 0, 0))
-    shadow_alpha = alpha.filter(ImageFilter.GaussianBlur(radius=18)).point(lambda p: int(p * 0.34))
-    shadow.putalpha(shadow_alpha)
-    card.alpha_composite(shadow, (x + 16, y + 20))
-
-    glow = Image.new("RGBA", player.size, (255, 218, 94, 0))
-    glow_alpha = alpha.filter(ImageFilter.GaussianBlur(radius=10)).point(lambda p: int(p * 0.16))
-    glow.putalpha(glow_alpha)
-    card.alpha_composite(glow, (x - 4, y - 4))
+    card.alpha_composite(player, (x, y))
+    return card
 
 
-def enhance_player(cutout: Image.Image) -> Image.Image:
-    """Give the cutout a slightly punchier poster-card finish."""
-    cutout = ImageEnhance.Contrast(cutout).enhance(1.08)
-    cutout = ImageEnhance.Color(cutout).enhance(1.05)
-    cutout = ImageEnhance.Sharpness(cutout).enhance(1.12)
-    return cutout
+def apply_optional_foreground(card: Image.Image) -> Image.Image:
+    if not FOREGROUND_SPLASH_PATH.exists():
+        return card
+
+    foreground = Image.open(FOREGROUND_SPLASH_PATH).convert("RGBA")
+    if foreground.size != card.size:
+        foreground = foreground.resize(card.size, Image.Resampling.LANCZOS)
+
+    return Image.alpha_composite(card, foreground)
 
 
-def composite_foreground_splashes(card: Image.Image) -> None:
-    """Optionally layer supplied foreground art over the player."""
-    if not FOREGROUND_SPLASHES_PATH.exists():
-        return
+def draw_centered_text(draw, center_x, center_y, text, font, fill):
+    bbox = draw.textbbox((0, 0), text, font=font)
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    x = center_x - width / 2 - bbox[0]
+    y = center_y - height / 2 - bbox[1]
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def draw_card_text(card, player_name, team_name, jersey_number, speed, shooting, passing):
+    draw = ImageDraw.Draw(card)
+
+    name_font = load_font(PLAYER_NAME_FONT_SIZE)
+    team_font = load_font(TEAM_NAME_FONT_SIZE)
+    jersey_font = load_font(JERSEY_NUMBER_FONT_SIZE)
+    stat_font = load_font(STAT_FONT_SIZE)
+
+    draw.text((PLAYER_NAME_X, PLAYER_NAME_Y), player_name.upper(), font=name_font, fill=PLAYER_NAME_COLOR)
+    draw.text((TEAM_NAME_X, TEAM_NAME_Y), team_name.upper(), font=team_font, fill=TEAM_NAME_COLOR)
+
+    draw_centered_text(draw, JERSEY_NUMBER_CENTER_X, JERSEY_NUMBER_CENTER_Y, str(jersey_number), jersey_font, JERSEY_NUMBER_COLOR)
+    draw_centered_text(draw, SPEED_CENTER_X, SPEED_CENTER_Y, str(speed), stat_font, SPEED_COLOR)
+    draw_centered_text(draw, SHOOTING_CENTER_X, SHOOTING_CENTER_Y, str(shooting), stat_font, SHOOTING_COLOR)
+    draw_centered_text(draw, PASSING_CENTER_X, PASSING_CENTER_Y, str(passing), stat_font, PASSING_COLOR)
+
+    return card
+
+
+def get_openai_api_key() -> Optional[str]:
     try:
-        overlay = Image.open(FOREGROUND_SPLASHES_PATH).convert("RGBA")
-        overlay = overlay.resize((CARD_WIDTH, CARD_HEIGHT), Image.Resampling.LANCZOS)
-        card.alpha_composite(overlay, (0, 0))
+        return st.secrets.get("OPENAI_API_KEY")
     except Exception:
-        # Foreground art is optional; never fail card generation because of it.
-        return
+        return None
 
 
-def load_background() -> Image.Image:
-    """Load the supplied static card template without regenerating it."""
-    if BACKGROUND_PATH.exists():
-        background = Image.open(BACKGROUND_PATH).convert("RGBA")
-        if background.size != (CARD_WIDTH, CARD_HEIGHT):
-            background = background.resize((CARD_WIDTH, CARD_HEIGHT), Image.Resampling.LANCZOS)
-        return background
-
-    # Development fallback only: keeps the app usable before the final asset is added.
-    fallback = Image.new("RGBA", (CARD_WIDTH, CARD_HEIGHT), "#F7E7B7")
-    draw = ImageDraw.Draw(fallback)
-    draw.rectangle((40, 40, CARD_WIDTH - 40, CARD_HEIGHT - 40), outline="#002B5C", width=8)
-    draw.text((70, 70), "Add assets/background.png", fill="#002B5C", font=load_font(42))
-    return fallback
-
-
-# -----------------------------------------------------------------------------
-# Optional OpenAI stylization
-# -----------------------------------------------------------------------------
-def stylize_player_with_openai(cutout: Image.Image) -> Image.Image:
-    """
-    Send only the cropped transparent player cutout to OpenAI for styling.
-    The final card is never generated by OpenAI.
-    """
-    if OpenAI is None:
-        raise RuntimeError("The openai package is not available.")
-
-    api_key = st.secrets.get("OPENAI_API_KEY", None)
+def stylize_cutout_with_openai(cutout: Image.Image) -> Image.Image:
+    api_key = get_openai_api_key()
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured in Streamlit secrets.")
 
-    client = OpenAI(api_key=api_key)
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("Install the openai package to enable AI artistic style.") from exc
 
-    image_buffer = BytesIO()
-    cutout.save(image_buffer, format="PNG")
+    cropped = crop_transparent_cutout(cutout, padding=32)
+
+    image_buffer = io.BytesIO()
+    cropped.save(image_buffer, format="PNG")
     image_buffer.seek(0)
     image_buffer.name = "player_cutout.png"
 
-    prompt = (
-        "Stylize this isolated transparent soccer player cutout only. "
-        "Keep the same pose, body shape, uniform identity, and transparent background. "
-        "Use watercolor texture, energetic ink sketch outlines, and a bold sports poster style. "
-        "Do not add text, logos, card borders, fields, crowds, frames, or a complete trading card."
-    )
+    client = OpenAI(api_key=api_key)
 
     result = client.images.edit(
         model="gpt-image-1-mini",
         image=image_buffer,
-        prompt=prompt,
+        prompt=AI_STYLE_PROMPT,
         size="1024x1536",
+        background="transparent",
+        n=1,
     )
 
-    b64_image = result.data[0].b64_json
-    styled_bytes = base64.b64decode(b64_image)
-    styled = Image.open(BytesIO(styled_bytes)).convert("RGBA")
+    image_data = result.data[0]
+    b64_image = getattr(image_data, "b64_json", None)
 
-    # Crop again because image models may add extra transparent/empty space.
-    return crop_to_alpha(styled, padding=12)
+    if not b64_image:
+        raise RuntimeError("OpenAI did not return image data.")
+
+    stylized_bytes = base64.b64decode(b64_image)
+    stylized = Image.open(io.BytesIO(stylized_bytes)).convert("RGBA")
+
+    return clean_cutout(stylized)
 
 
-def prepare_player_cutout(source_image: Image.Image, use_ai_style: bool) -> Image.Image:
-    """Run rembg first, then optionally AI-stylize the cropped cutout."""
-    cutout = remove_background(source_image)
-    cutout = crop_to_alpha(cutout, padding=18)
-    cutout = clean_cutout_alpha(cutout)
+def prepare_player_cutout(source_image: Image.Image, use_ai_style: bool):
+    rembg_cutout = remove_player_background(source_image)
 
     if not use_ai_style:
-        return cutout
+        return rembg_cutout, False, None
 
     try:
-        with st.spinner("Applying AI artistic style to player cutout…"):
-            styled = stylize_player_with_openai(cutout)
-            styled = clean_cutout_alpha(styled)
-            return styled
+        stylized = stylize_cutout_with_openai(rembg_cutout)
+        return stylized, True, None
     except Exception as exc:
-        st.warning(f"AI styling failed, so the normal cutout was used instead. ({exc})")
-        return cutout
+        return rembg_cutout, False, str(exc)
 
 
-# -----------------------------------------------------------------------------
-# Card generation
-# -----------------------------------------------------------------------------
-def generate_card(
-    source_image: Image.Image,
-    player_name: str,
-    team_name: str,
-    jersey_number: str,
-    speed: int,
-    shooting: int,
-    passing: int,
-    use_ai_style: bool,
-) -> Image.Image:
-    """Create the final card with Pillow compositing and text rendering."""
-    card = load_background()
+def build_card(source_image, player_name, team_name, jersey_number, speed, shooting, passing, use_ai_style):
+    if not BACKGROUND_PATH.exists():
+        raise FileNotFoundError("Missing assets/background.png.")
 
-    player_cutout = prepare_player_cutout(source_image, use_ai_style=use_ai_style)
-    player_cutout = enhance_player(player_cutout)
-    player_resized, shot_type = resize_player_for_zone(player_cutout)
-    x, y = player_paste_position(player_resized, shot_type)
+    background = Image.open(BACKGROUND_PATH).convert("RGBA")
+    if background.size != (CARD_WIDTH, CARD_HEIGHT):
+        background = background.resize((CARD_WIDTH, CARD_HEIGHT), Image.Resampling.LANCZOS)
 
-    add_player_shadow(card, player_resized, x, y)
-    card.alpha_composite(player_resized, (x, y))
-    composite_foreground_splashes(card)
+    cutout, ai_used, ai_error = prepare_player_cutout(source_image, use_ai_style)
 
-    draw_card_text(
-        card,
-        player_name=player_name,
-        team_name=team_name,
-        jersey_number=jersey_number,
-        speed=speed,
-        shooting=shooting,
-        passing=passing,
-    )
+    card = paste_player_with_blend(background, cutout)
+    card = apply_optional_foreground(card)
+    card = draw_card_text(card, player_name, team_name, jersey_number, speed, shooting, passing)
 
-    return card.convert("RGB")
+    return card, ai_used, ai_error
 
 
 def image_to_png_bytes(image: Image.Image) -> bytes:
-    """Serialize a Pillow image to PNG bytes for Streamlit download."""
-    buffer = BytesIO()
-    image.save(buffer, format="PNG", optimize=True)
-    return buffer.getvalue()
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
 
 
-# -----------------------------------------------------------------------------
-# UI
-# -----------------------------------------------------------------------------
-with st.form("card_inputs"):
-    player_name = st.text_input("Player Name", value="Alex Morgan")
-    team_name = st.text_input("Team Name", value="CSC United")
-    jersey_number = st.text_input("Jersey Number", value="10", max_chars=3)
+def main():
+    st.set_page_config(page_title="CSC Tournament Card Generator", page_icon="⚽", layout="centered")
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        speed = st.slider("Speed", 0, 99, 88)
-    with col2:
-        shooting = st.slider("Shooting", 0, 99, 91)
-    with col3:
-        passing = st.slider("Passing", 0, 99, 84)
+    st.title("CSC Tournament Card Generator")
+    st.caption("Create a 1080×1350 tournament trading card from a camera or uploaded player photo.")
 
-    use_ai_style = st.checkbox(
-        "Use AI artistic style",
-        value=False,
-        help=(
-            "Optional. Uses rembg first, then sends only the transparent player cutout "
-            "to OpenAI for watercolor + ink sports-poster styling."
-        ),
-    )
+    with st.form("card_form"):
+        player_name = st.text_input("Player Name", value="", placeholder="Enter player name")
+        team_name = st.text_input("Team Name", value="", placeholder="Enter team name")
+        jersey_number = st.text_input("Jersey Number", value="10", max_chars=3)
 
-    st.markdown("### Player photo")
-    camera_photo = st.camera_input("Take a player photo")
-    uploaded_photo = st.file_uploader(
-        "Or upload a player photo",
-        type=["png", "jpg", "jpeg", "webp"],
-    )
+        col_a, col_b, col_c = st.columns(3)
 
-    submitted = st.form_submit_button("Generate card", type="primary")
+        with col_a:
+            speed = st.slider("Speed", min_value=1, max_value=99, value=88)
+        with col_b:
+            shooting = st.slider("Shooting", min_value=1, max_value=99, value=84)
+        with col_c:
+            passing = st.slider("Passing", min_value=1, max_value=99, value=82)
 
-selected_photo = camera_photo or uploaded_photo
+        use_ai_style = st.checkbox(
+            "Use AI artistic style",
+            value=False,
+            help="Uses OpenAI to stylize only the background-removed player cutout. If it fails, the normal free version is used.",
+        )
 
-if submitted:
-    if not player_name.strip():
-        st.error("Enter a player name.")
-    elif not team_name.strip():
-        st.error("Enter a team name.")
-    elif not jersey_number.strip():
-        st.error("Enter a jersey number.")
-    elif selected_photo is None:
-        st.error("Take or upload a player photo.")
-    else:
+        st.subheader("Player photo")
+
+        camera_photo = st.camera_input("Take a photo")
+        uploaded_photo = st.file_uploader(
+            "Or upload a player photo",
+            type=["png", "jpg", "jpeg", "webp"],
+            accept_multiple_files=False,
+        )
+
+        submitted = st.form_submit_button("Generate card", type="primary", use_container_width=True)
+
+    selected_photo = camera_photo or uploaded_photo
+
+    if submitted:
+        if not player_name.strip() or not team_name.strip() or not jersey_number.strip():
+            st.error("Please enter player name, team name, and jersey number.")
+            return
+
+        if selected_photo is None:
+            st.error("Please take or upload a player photo.")
+            return
+
         try:
-            source = read_input_image(selected_photo)
-            with st.spinner("Generating card…"):
-                final_card = generate_card(
-                    source_image=source,
+            source_image = open_image_from_input(selected_photo)
+
+            with st.spinner("Generating your card..."):
+                card, ai_used, ai_error = build_card(
+                    source_image=source_image,
                     player_name=player_name.strip(),
                     team_name=team_name.strip(),
                     jersey_number=jersey_number.strip(),
@@ -522,28 +401,26 @@ if submitted:
                     use_ai_style=use_ai_style,
                 )
 
-            st.success("Card generated.")
-            st.image(final_card, caption="Final card preview", use_container_width=True)
+            if use_ai_style and ai_used:
+                st.success("AI artistic player style applied.")
+            elif use_ai_style and ai_error:
+                st.warning(f"AI style failed, so the normal cutout was used. Details: {ai_error}")
 
-            png_bytes = image_to_png_bytes(final_card)
-            safe_name = "_".join(player_name.strip().lower().split()) or "player"
+            png_bytes = image_to_png_bytes(card)
+
+            st.image(png_bytes, caption="Generated CSC tournament card", use_container_width=True)
+
             st.download_button(
                 "Download PNG",
                 data=png_bytes,
-                file_name=f"{safe_name}_csc_card.png",
+                file_name=f"csc-card-{player_name.strip().lower().replace(' ', '-')}.png",
                 mime="image/png",
+                use_container_width=True,
             )
-        except RuntimeError as exc:
-            st.error(str(exc))
-        except ValueError as exc:
-            st.error(str(exc))
+
         except Exception as exc:
-            st.error(f"Card generation failed. Try another photo. ({exc})")
-else:
-    st.info("Enter player details, add a photo, then generate the card.")
-    if BACKGROUND_PATH.exists():
-        try:
-            preview_bg = load_background().convert("RGB")
-            st.image(preview_bg, caption="Current background template", use_container_width=True)
-        except Exception:
-            pass
+            st.error(f"Could not generate the card: {exc}")
+
+
+if __name__ == "__main__":
+    main()
