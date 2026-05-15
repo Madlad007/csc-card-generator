@@ -1,8 +1,10 @@
 import base64
 import io
+from collections import deque
 from pathlib import Path
 from typing import Optional, Tuple
 
+import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 from rembg import remove
@@ -14,14 +16,18 @@ CARD_HEIGHT = 1350
 BACKGROUND_PATH = Path("assets/background.png")
 FOREGROUND_SPLASH_PATH = Path("assets/foreground_splashes.png")
 
-PLAYER_ZONE_X1 = 390
-PLAYER_ZONE_Y1 = 160
-PLAYER_ZONE_X2 = 740
-PLAYER_ZONE_Y2 = 1120
+PLAYER_ZONE_X1 = 365
+PLAYER_ZONE_Y1 = 115
+PLAYER_ZONE_X2 = 780
+PLAYER_ZONE_Y2 = 1180
 
 FULL_BODY_TARGET_HEIGHT = 1050
 HALF_BODY_TARGET_HEIGHT = 980
 CLOSE_UP_TARGET_HEIGHT = 900
+
+AI_FULL_BODY_TARGET_HEIGHT = 1180
+AI_HALF_BODY_TARGET_HEIGHT = 1120
+AI_CLOSE_UP_TARGET_HEIGHT = 1040
 
 PLAYER_NAME_X = 105
 PLAYER_NAME_Y = 205
@@ -140,6 +146,74 @@ def crop_transparent_cutout(image: Image.Image, padding: int = 24) -> Image.Imag
     return image.crop((left, top, right, bottom)).convert("RGBA")
 
 
+def add_transparent_padding(image: Image.Image, padding: int = 24) -> Image.Image:
+    image = image.convert("RGBA")
+    output = Image.new("RGBA", (image.width + padding * 2, image.height + padding * 2), (0, 0, 0, 0))
+    output.alpha_composite(image, (padding, padding))
+    return output
+
+
+def remove_connected_light_background(image: Image.Image) -> Image.Image:
+    """
+    Removes white/cream background only when connected to the image borders.
+    This avoids removing white shorts/socks inside the player.
+    """
+    image = image.convert("RGBA")
+    arr = np.array(image)
+
+    rgb = arr[:, :, :3].astype(np.int16)
+    alpha = arr[:, :, 3]
+
+    light = (
+        (rgb[:, :, 0] > 228)
+        & (rgb[:, :, 1] > 228)
+        & (rgb[:, :, 2] > 220)
+        & (alpha > 0)
+    )
+
+    h, w = light.shape
+    visited = np.zeros((h, w), dtype=bool)
+    q = deque()
+
+    for x in range(w):
+        if light[0, x]:
+            q.append((0, x))
+        if light[h - 1, x]:
+            q.append((h - 1, x))
+
+    for y in range(h):
+        if light[y, 0]:
+            q.append((y, 0))
+        if light[y, w - 1]:
+            q.append((y, w - 1))
+
+    while q:
+        y, x = q.popleft()
+        if visited[y, x] or not light[y, x]:
+            continue
+
+        visited[y, x] = True
+
+        if y > 0:
+            q.append((y - 1, x))
+        if y < h - 1:
+            q.append((y + 1, x))
+        if x > 0:
+            q.append((y, x - 1))
+        if x < w - 1:
+            q.append((y, x + 1))
+
+    arr[:, :, 3] = np.where(visited, 0, alpha)
+    return Image.fromarray(arr, mode="RGBA")
+
+
+def feather_alpha(image: Image.Image, radius: float = 0.55) -> Image.Image:
+    image = image.convert("RGBA")
+    r, g, b, a = image.split()
+    a = a.filter(ImageFilter.GaussianBlur(radius=radius))
+    return Image.merge("RGBA", (r, g, b, a))
+
+
 def clean_cutout(cutout: Image.Image) -> Image.Image:
     cutout = cutout.convert("RGBA")
     r, g, b, a = cutout.split()
@@ -153,6 +227,26 @@ def clean_cutout(cutout: Image.Image) -> Image.Image:
 
     cleaned = Image.merge("RGBA", (*rgb.split(), a))
     return crop_transparent_cutout(cleaned, padding=18)
+
+
+def postprocess_ai_cutout(image: Image.Image) -> Image.Image:
+    image = image.convert("RGBA")
+
+    image = remove_connected_light_background(image)
+    image = crop_transparent_cutout(image, padding=18)
+    image = add_transparent_padding(image, padding=24)
+
+    r, g, b, a = image.split()
+    rgb = Image.merge("RGB", (r, g, b))
+
+    rgb = ImageEnhance.Color(rgb).enhance(1.08)
+    rgb = ImageEnhance.Contrast(rgb).enhance(1.10)
+    rgb = ImageEnhance.Sharpness(rgb).enhance(1.12)
+
+    image = Image.merge("RGBA", (*rgb.split(), a))
+    image = feather_alpha(image, radius=0.55)
+
+    return crop_transparent_cutout(image, padding=12)
 
 
 def remove_player_background(image: Image.Image) -> Image.Image:
@@ -180,22 +274,31 @@ def classify_player_shot(cutout: Image.Image) -> str:
     return "close_up"
 
 
-def resize_player_for_zone(cutout: Image.Image) -> Tuple[Image.Image, str]:
+def resize_player_for_zone(cutout: Image.Image, is_ai: bool = False) -> Tuple[Image.Image, str]:
     shot_type = classify_player_shot(cutout)
 
-    target_height = {
-        "full_body": FULL_BODY_TARGET_HEIGHT,
-        "half_body": HALF_BODY_TARGET_HEIGHT,
-        "close_up": CLOSE_UP_TARGET_HEIGHT,
-    }[shot_type]
+    if is_ai:
+        target_height = {
+            "full_body": AI_FULL_BODY_TARGET_HEIGHT,
+            "half_body": AI_HALF_BODY_TARGET_HEIGHT,
+            "close_up": AI_CLOSE_UP_TARGET_HEIGHT,
+        }[shot_type]
+    else:
+        target_height = {
+            "full_body": FULL_BODY_TARGET_HEIGHT,
+            "half_body": HALF_BODY_TARGET_HEIGHT,
+            "close_up": CLOSE_UP_TARGET_HEIGHT,
+        }[shot_type]
 
     scale = target_height / max(1, cutout.height)
     new_width = max(1, int(cutout.width * scale))
     new_height = max(1, int(cutout.height * scale))
 
     zone_width = PLAYER_ZONE_X2 - PLAYER_ZONE_X1
-    if new_width > zone_width * 1.22:
-        scale = (zone_width * 1.22) / max(1, cutout.width)
+    max_width_factor = 1.72 if is_ai else 1.22
+
+    if new_width > zone_width * max_width_factor:
+        scale = (zone_width * max_width_factor) / max(1, cutout.width)
         new_width = max(1, int(cutout.width * scale))
         new_height = max(1, int(cutout.height * scale))
 
@@ -203,23 +306,34 @@ def resize_player_for_zone(cutout: Image.Image) -> Tuple[Image.Image, str]:
     return resized, shot_type
 
 
-def paste_player_with_blend(card: Image.Image, cutout: Image.Image) -> Image.Image:
-    player, shot_type = resize_player_for_zone(cutout)
+def paste_player_with_blend(card: Image.Image, cutout: Image.Image, is_ai: bool = False) -> Image.Image:
+    player, shot_type = resize_player_for_zone(cutout, is_ai=is_ai)
 
     zone_width = PLAYER_ZONE_X2 - PLAYER_ZONE_X1
     zone_height = PLAYER_ZONE_Y2 - PLAYER_ZONE_Y1
 
     x = int(PLAYER_ZONE_X1 + (zone_width - player.width) / 2)
 
-    if shot_type == "full_body":
-        y = int(PLAYER_ZONE_Y2 - player.height)
-    elif shot_type == "half_body":
-        y = int(PLAYER_ZONE_Y1 + zone_height * 0.28)
+    if is_ai:
+        if shot_type == "full_body":
+            y = int(PLAYER_ZONE_Y2 - player.height + 70)
+        elif shot_type == "half_body":
+            y = int(PLAYER_ZONE_Y1 + zone_height * 0.18)
+        else:
+            y = int(PLAYER_ZONE_Y1 + zone_height * 0.12)
     else:
-        y = int(PLAYER_ZONE_Y1 + zone_height * 0.2)
+        if shot_type == "full_body":
+            y = int(PLAYER_ZONE_Y2 - player.height)
+        elif shot_type == "half_body":
+            y = int(PLAYER_ZONE_Y1 + zone_height * 0.28)
+        else:
+            y = int(PLAYER_ZONE_Y1 + zone_height * 0.2)
 
     x = max(0, min(CARD_WIDTH - player.width, x))
     y = max(0, min(CARD_HEIGHT - player.height, y))
+
+    if is_ai:
+        player = feather_alpha(player, radius=0.35)
 
     card.alpha_composite(player, (x, y))
     return card
@@ -308,7 +422,7 @@ def stylize_cutout_with_openai(cutout: Image.Image) -> Image.Image:
     stylized_bytes = base64.b64decode(b64_image)
     stylized = Image.open(io.BytesIO(stylized_bytes)).convert("RGBA")
 
-    return clean_cutout(stylized)
+    return postprocess_ai_cutout(stylized)
 
 
 def prepare_player_cutout(source_image: Image.Image, use_ai_style: bool):
@@ -334,7 +448,7 @@ def build_card(source_image, player_name, team_name, jersey_number, speed, shoot
 
     cutout, ai_used, ai_error = prepare_player_cutout(source_image, use_ai_style)
 
-    card = paste_player_with_blend(background, cutout)
+    card = paste_player_with_blend(background, cutout, is_ai=ai_used)
     card = apply_optional_foreground(card)
     card = draw_card_text(card, player_name, team_name, jersey_number, speed, shooting, passing)
 
