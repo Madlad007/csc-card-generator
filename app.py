@@ -97,6 +97,7 @@ Output rules:
 - No badges.
 - No shadows.
 - No watermark.
+"""
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont:
