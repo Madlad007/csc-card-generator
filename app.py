@@ -19,9 +19,9 @@ PLAYER_ZONE_Y1 = 160
 PLAYER_ZONE_X2 = 740
 PLAYER_ZONE_Y2 = 1120
 
-FULL_BODY_TARGET_HEIGHT = 840
-HALF_BODY_TARGET_HEIGHT = 720
-CLOSE_UP_TARGET_HEIGHT = 600
+FULL_BODY_TARGET_HEIGHT = 1050
+HALF_BODY_TARGET_HEIGHT = 980
+CLOSE_UP_TARGET_HEIGHT = 900
 
 PLAYER_NAME_X = 105
 PLAYER_NAME_Y = 205
@@ -67,25 +67,36 @@ FONT_CANDIDATES = [
 AI_STYLE_PROMPT = """
 You are an expert sports illustrator and digital artist.
 
-Transform the provided background-removed soccer player cutout into a hyper-detailed artistic sports portrait in a sketch + watercolor splash style, inspired by premium sports poster art.
+Transform the provided background-removed soccer player cutout into a hyper-detailed sketch + watercolor sports portrait.
 
-Follow these rules carefully:
+Create a WAIST-UP or MID-THIGH-UP composition only. The player must appear large, dominant, and poster-worthy, not small or full-body.
 
-- Preserve the player’s identity, facial features, hairstyle, beard, skin tone, expression, and proportions exactly.
-- Preserve the player’s pose, jersey, shorts, socks, shoes, and overall body composition exactly.
-- Keep the artwork as a full-body or three-quarter sports portrait with dynamic athletic energy.
-- Use expressive hand-drawn ink sketch lines with rough energetic strokes.
-- Add watercolor splashes, paint textures, ink drops, and abstract brush strokes around the player.
-- Use the jersey/team colors naturally inside the artistic splashes and paint effects.
-- Background must remain clean white with abstract watercolor splashes only.
-- Do NOT add scenery, stadiums, gradients, backgrounds, landscapes, or environments.
-- Do NOT add typography, text, numbers, names, logos, borders, trading card layouts, quotes, badges, or design elements.
-- Do NOT add shadows, floor shadows, fake lighting glows, or pasted cutout effects.
-- The artwork must feel naturally painted and integrated.
-- Maintain transparent background outside the painted player artwork.
-- Return ONLY the final artistic PNG cutout with transparency.
-- No watermark. No explanation. No text.
-"""
+Composition rules:
+- Crop the artwork from roughly waist or mid-thigh upward.
+- Keep the player centered.
+- Make the face and upper body large and prominent.
+- The final player artwork should fill most of the vertical canvas.
+- Preserve the player’s identity, face, hairstyle, beard, skin tone, expression, jersey, pose, and body proportions.
+- Do not change the player into a different person.
+
+Style rules:
+- Use hand-drawn ink sketch lines.
+- Add watercolor paint textures, splashes, ink drops, rough energetic strokes, and subtle grunge detail.
+- Use the jersey/team colors naturally in the paint splashes.
+- Make it look like a premium sports poster illustration.
+
+Output rules:
+- Return only the artistic player cutout.
+- Transparent background outside the player and paint splashes.
+- No white rectangle.
+- No card layout.
+- No text.
+- No names.
+- No numbers.
+- No logos.
+- No badges.
+- No shadows.
+- No watermark.
 
 
 def load_font(size: int) -> ImageFont.FreeTypeFont:
